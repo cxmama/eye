@@ -1,151 +1,167 @@
 import streamlit as st
+import cv2
+import mediapipe as mp
+import numpy as np
+from PIL import Image
+import io
 import pandas as pd
-import math
-from pathlib import Path
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
+# 初始化 MediaPipe Face Mesh
+mp_face_mesh = mp.solutions.face_mesh
+face_mesh = mp_face_mesh.FaceMesh(
+    max_num_faces=1,
+    refine_landmarks=True,  # 启用精细关键点，包括瞳孔
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5
 )
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+# 页面标题
+st.title("Pupillary Distance Measurement (in mm)")
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+# 侧边栏选择：上传图片或使用摄像头
+option = st.sidebar.selectbox("Select Input Method", ["Upload Image", "Use Webcam"])
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+# 侧边栏添加参考脸宽输入
+REFERENCE_FACE_WIDTH_MM = st.sidebar.number_input("Enter reference face width (mm)", min_value=100.0, max_value=200.0, value=140.0, step=1.0)
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+def calculate_distance(point1, point2):
+    """Calculate Euclidean distance between two points"""
+    return np.sqrt((point2[0] - point1[0])**2 + (point2[1] - point1[1])**2)
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+def measure_pupillary_distance(frame, results):
+    """Measure pupillary distance using MediaPipe landmarks"""
+    if not results.multi_face_landmarks:
+        return None, None, None
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
+    landmarks = results.multi_face_landmarks[0].landmark
+    h, w, _ = frame.shape
+    
+    # MediaPipe 关键点：左眼瞳孔 (468), 右眼瞳孔 (473)
+    left_pupil = (int(landmarks[468].x * w), int(landmarks[468].y * h))
+    right_pupil = (int(landmarks[473].x * w), int(landmarks[473].y * h))
+    
+    # 计算瞳距（像素）
+    pd_px = calculate_distance(left_pupil, right_pupil)
+    
+    # 使用脸宽作为参考（关键点 33 和 263 近似脸颊两侧）
+    left_cheek = (int(landmarks[33].x * w), int(landmarks[33].y * h))
+    right_cheek = (int(landmarks[263].x * w), int(landmarks[263].y * h))
+    face_width_px = calculate_distance(left_cheek, right_cheek)
+    
+    # 计算像素到毫米的比例
+    pixel_to_mm_ratio = REFERENCE_FACE_WIDTH_MM / face_width_px
+    
+    # 转换为毫米
+    pd_mm = round(pd_px * pixel_to_mm_ratio, 2)
+    
+    return {"Pupillary Distance (PD)": pd_mm}, pixel_to_mm_ratio, (left_pupil, right_pupil)
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+def draw_measurements_on_lines(frame, pupil_points, pd_mm):
+    """Draw pupillary distance measurement on the line in mm"""
+    left_pupil, right_pupil = pupil_points
+    pd_mid_x = int((left_pupil[0] + right_pupil[0]) / 2)
+    pd_mid_y = int((left_pupil[1] + right_pupil[1]) / 2)
+    
+    # 绘制瞳孔标记点
+    cv2.circle(frame, left_pupil, 3, (0, 255, 0), -1)
+    cv2.circle(frame, right_pupil, 3, (0, 255, 0), -1)
+    
+    # 绘制连接线和测量值
+    cv2.line(frame, left_pupil, right_pupil, (0, 0, 255), 2)
+    cv2.putText(frame, f"{pd_mm['Pupillary Distance (PD)']} mm", (pd_mid_x - 20, pd_mid_y - 10), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+    
+    return frame
 
-    return gdp_df
+def get_csv_download(pd_mm):
+    """Generate CSV file with pupillary distance in mm"""
+    df = pd.DataFrame([pd_mm], columns=["Pupillary Distance (PD)"])
+    csv_buffer = io.StringIO()
+    df.to_csv(csv_buffer, index=False)
+    return csv_buffer.getvalue().encode('utf-8')
 
-gdp_df = get_gdp_data()
+if option == "Upload Image":
+    uploaded_file = st.file_uploader("Upload a facial photo", type=["jpg", "jpeg", "png"])
+    if uploaded_file is not None:
+        # 读取上传的图片
+        image = Image.open(uploaded_file)
+        frame = np.array(image)
+        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
-# -----------------------------------------------------------------------------
-# Draw the actual page
+        # 处理图像
+        results = face_mesh.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
+        if results.multi_face_landmarks:
+            pd_mm, pixel_to_mm_ratio, pupil_points = measure_pupillary_distance(frame, results)
+            if pd_mm:
+                frame = draw_measurements_on_lines(frame, pupil_points, pd_mm)
+                
+                # 显示结果
+                st.image(frame, caption="Pupillary Distance Measurement (mm)", channels="BGR")
+                st.write(f"Pixel-to-mm ratio: {pixel_to_mm_ratio:.4f} mm/px")
 
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
+                # 提供 CSV 下载按钮
+                csv_data = get_csv_download(pd_mm)
+                st.download_button(
+                    label="Download PD as CSV (mm)",
+                    data=csv_data,
+                    file_name="pupillary_distance_mm.csv",
+                    mime="text/csv",
+                    key="download_csv_image"
+                )
         else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
+            st.write("No face detected. Please upload a clear facial photo.")
 
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
+elif option == "Use Webcam":
+    st.write("Click the button below to start webcam measurement")
+    run_webcam = st.button("Start Webcam", key="start_webcam")
+    stop_webcam = st.button("Stop Webcam", key="stop_webcam")
+
+    # 初始化 session state
+    if 'pd_mm' not in st.session_state:
+        st.session_state.pd_mm = None
+    if 'running' not in st.session_state:
+        st.session_state.running = False
+
+    if run_webcam:
+        st.session_state.running = True
+        cap = cv2.VideoCapture(0)
+        stframe = st.empty()
+
+        while st.session_state.running:
+            ret, frame = cap.read()
+            if not ret:
+                st.write("Unable to open webcam. Please check your device.")
+                break
+
+            # 处理帧
+            results = face_mesh.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+
+            if results.multi_face_landmarks:
+                pd_mm, pixel_to_mm_ratio, pupil_points = measure_pupillary_distance(frame, results)
+                if pd_mm:
+                    st.session_state.pd_mm = pd_mm
+                    frame = draw_measurements_on_lines(frame, pupil_points, pd_mm)
+                    stframe.image(frame, channels="BGR", caption="Real-Time PD Measurement (mm)")
+
+            if stop_webcam:
+                st.session_state.running = False
+                break
+
+        cap.release()
+        cv2.destroyAllWindows()
+
+    # 显示下载按钮
+    if st.session_state.pd_mm:
+        csv_data = get_csv_download(st.session_state.pd_mm)
+        st.download_button(
+            label="Download PD as CSV (mm)",
+            data=csv_data,
+            file_name="pupillary_distance_mm.csv",
+            mime="text/csv",
+            key="download_csv_webcam"
         )
+
+# 侧边栏说明
+st.sidebar.write("古主任，这是试验版本.")
+st.sidebar.write("古主任，仅用于测试")
