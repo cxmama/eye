@@ -125,7 +125,7 @@ elif option == "Use Webcam":
 
     if run_webcam:
         st.session_state.running = True
-        cap = cv2.VideoCapture(0)
+        cap = cv2.VideoCapture(1)
         if not cap.isOpened():
             st.write("Unable to open webcam. Please check your device.")
         else:
