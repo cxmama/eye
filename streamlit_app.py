@@ -5,6 +5,7 @@ import numpy as np
 from PIL import Image
 import io
 import pandas as pd
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
 
 # 初始化 MediaPipe Face Mesh
 mp_face_mesh = mp.solutions.face_mesh
@@ -80,6 +81,23 @@ def get_csv_download(pd_mm):
     df.to_csv(csv_buffer, index=False)
     return csv_buffer.getvalue().encode('utf-8')
 
+# 定义视频处理器
+class VideoProcessor(VideoProcessorBase):
+    def __init__(self):
+        self.pd_mm = None
+
+    def recv(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+        results = face_mesh.process(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+        
+        if results.multi_face_landmarks:
+            pd_mm, pixel_to_mm_ratio, pupil_points = measure_pupillary_distance(img, results)
+            if pd_mm:
+                self.pd_mm = pd_mm
+                img = draw_measurements_on_lines(img, pupil_points, pd_mm)
+        
+        return frame.from_ndarray(img, format="bgr24")
+
 if option == "上传图片":
     uploaded_file = st.file_uploader("上传面部照片", type=["jpg", "jpeg", "png"])
     if uploaded_file is not None:
@@ -113,58 +131,28 @@ if option == "上传图片":
             st.write("未检测到面部。请上传清晰的面部照片。")
 
 elif option == "使用摄像头":
-    st.write("点击下方按钮开始摄像头测量")
+    st.write("通过浏览器使用您的摄像头进行实时瞳距测量。")
+    
+    # WebRTC 配置
+    rtc_configuration = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
     
     # 初始化 session state
-    if 'running' not in st.session_state:
-        st.session_state.running = False
     if 'pd_mm' not in st.session_state:
         st.session_state.pd_mm = None
     
-    # 按钮控制
-    col1, col2 = st.columns(2)
-    with col1:
-        start_button = st.button("开始测量", key="start_webcam")
-    with col2:
-        stop_button = st.button("停止测量", key="stop_webcam")
+    # 启动 WebRTC 流
+    webrtc_ctx = webrtc_streamer(
+        key="pupillary-distance-measurement",
+        video_processor_factory=VideoProcessor,
+        rtc_configuration=rtc_configuration,
+        media_stream_constraints={"video": True, "audio": False},
+    )
 
-    if start_button:
-        st.session_state.running = True
+    # 获取最新的瞳距数据
+    if webrtc_ctx.video_processor:
+        if webrtc_ctx.video_processor.pd_mm:
+            st.session_state.pd_mm = webrtc_ctx.video_processor.pd_mm
     
-    if stop_button:
-        st.session_state.running = False
-
-    # 摄像头处理
-    if st.session_state.running:
-        cap = cv2.VideoCapture(-1)
-        if not cap.isOpened():
-            st.error("无法打开摄像头。请检查设备是否连接或权限是否正确。")
-            st.session_state.running = False
-        else:
-            stframe = st.empty()
-            while st.session_state.running:
-                ret, frame = cap.read()
-                if not ret:
-                    st.error("无法读取摄像头画面。请检查设备。")
-                    break
-
-                # 处理帧
-                results = face_mesh.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                if results.multi_face_landmarks:
-                    pd_mm, pixel_to_mm_ratio, pupil_points = measure_pupillary_distance(frame, results)
-                    if pd_mm:
-                        st.session_state.pd_mm = pd_mm
-                        frame = draw_measurements_on_lines(frame, pupil_points, pd_mm)
-                        stframe.image(frame, channels="BGR", caption="实时瞳距测量（毫米）")
-
-                # 检查停止按钮（非实时响应，但避免阻塞）
-                if stop_button:
-                    st.session_state.running = False
-                    break
-
-            cap.release()
-            cv2.destroyAllWindows()
-
     # 显示下载按钮
     if st.session_state.pd_mm:
         csv_data = get_csv_download(st.session_state.pd_mm)
