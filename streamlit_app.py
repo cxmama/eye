@@ -126,30 +126,33 @@ elif option == "Use Webcam":
     if run_webcam:
         st.session_state.running = True
         cap = cv2.VideoCapture(0)
-        stframe = st.empty()
+        if not cap.isOpened():
+            st.write("Unable to open webcam. Please check your device.")
+        else:
+            stframe = st.empty()
 
-        while st.session_state.running:
-            ret, frame = cap.read()
-            if not ret:
-                st.write("Unable to open webcam. Please check your device.")
-                break
+            while st.session_state.running:
+                ret, frame = cap.read()
+                if not ret:
+                    st.write("Error reading frame from webcam. Please check your device.")
+                    break
 
-            # 处理帧
-            results = face_mesh.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                # 处理帧
+                results = face_mesh.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
-            if results.multi_face_landmarks:
-                pd_mm, pixel_to_mm_ratio, pupil_points = measure_pupillary_distance(frame, results)
-                if pd_mm:
-                    st.session_state.pd_mm = pd_mm
-                    frame = draw_measurements_on_lines(frame, pupil_points, pd_mm)
-                    stframe.image(frame, channels="BGR", caption="Real-Time PD Measurement (mm)")
+                if results.multi_face_landmarks:
+                    pd_mm, pixel_to_mm_ratio, pupil_points = measure_pupillary_distance(frame, results)
+                    if pd_mm:
+                        st.session_state.pd_mm = pd_mm
+                        frame = draw_measurements_on_lines(frame, pupil_points, pd_mm)
+                        stframe.image(frame, channels="BGR", caption="Real-Time PD Measurement (mm)")
 
-            if stop_webcam:
-                st.session_state.running = False
-                break
+                if stop_webcam:
+                    st.session_state.running = False
+                    break
 
-        cap.release()
-        cv2.destroyAllWindows()
+            cap.release()
+            cv2.destroyAllWindows()
 
     # 显示下载按钮
     if st.session_state.pd_mm:
@@ -163,5 +166,5 @@ elif option == "Use Webcam":
         )
 
 # 侧边栏说明
-st.sidebar.write("古主任，这是试验版本.")
-st.sidebar.write("古主任，仅用于测试")
+st.sidebar.write("Note: This uses MediaPipe Face Mesh for precise pupil detection.")
+st.sidebar.write("Measurements are calibrated based on the reference face width provided.")
