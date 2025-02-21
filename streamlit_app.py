@@ -136,7 +136,7 @@ elif option == "使用摄像头":
 
     # 摄像头处理
     if st.session_state.running:
-        cap = cv2.VideoCapture()
+        cap = cv2.VideoCapture(-1)
         if not cap.isOpened():
             st.error("无法打开摄像头。请检查设备是否连接或权限是否正确。")
             st.session_state.running = False
