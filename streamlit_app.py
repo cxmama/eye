@@ -87,9 +87,6 @@ class VideoProcessor(VideoProcessorBase):
         self.pd_mm = None
 
     def recv(self, frame):
-        if frame is None:
-            st.error("未接收到视频帧。")
-            return None
         img = frame.to_ndarray(format="bgr24")
         results = face_mesh.process(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
         
@@ -137,13 +134,7 @@ elif option == "使用摄像头":
     st.write("通过浏览器使用您的摄像头进行实时瞳距测量。")
     
     # WebRTC 配置
-    rtc_configuration = RTCConfiguration({
-        "iceServers": [
-            {"urls": ["stun:stun.l.google.com:19302"]},
-            {"urls": ["stun:stun1.l.google.com:19302"]},
-            {"urls": ["stun:stun2.l.google.com:19302"]}
-        ]
-    })
+    rtc_configuration = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
     
     # 初始化 session state
     if 'pd_mm' not in st.session_state:
@@ -174,6 +165,5 @@ elif option == "使用摄像头":
         )
 
 # 侧边栏说明
-st.sidebar.write("网络版本可能无法使用摄像头功能。如需摄像头，请在本地运行应用：`streamlit run streamlit_app.py`。")
 st.sidebar.write("古主任，这是试验版本.")
 st.sidebar.write("古主任，仅用于测试")
